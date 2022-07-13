@@ -59,7 +59,7 @@ pub fn new_partial(
 	ServiceError,
 > {
 	if config.keystore_remote.is_some() {
-		return Err(ServiceError::Other("Remote Keystores are not supported.".into()))
+		return Err(ServiceError::Other("Remote Keystores are not supported.".into()));
 	}
 
 	let telemetry = config
@@ -92,6 +92,19 @@ pub fn new_partial(
 		task_manager.spawn_handle().spawn("telemetry", None, worker.run());
 		telemetry
 	});
+
+	let keystore = keystore_container.sync_keystore();
+	if config.offchain_worker.enabled {
+		// Initialize seed for signing transaction using offchain workers. This is a convenience
+		// so learners can see the transactions submitted simply running the node.
+		// Typically these keys should be inserted with RPC calls to `author_insertKey`.
+		sp_keystore::SyncCryptoStore::sr25519_generate_new(
+			&*keystore,
+			node_template_runtime::pallet_template::KEY_TYPE,
+			Some("//Alice"),
+		)
+		.expect("Creating key with account Alice should succeed.");
+	}
 
 	let select_chain = sc_consensus::LongestChain::new(backend.clone());
 
@@ -172,11 +185,12 @@ pub fn new_full(mut config: Configuration) -> Result<TaskManager, ServiceError> 
 	if let Some(url) = &config.keystore_remote {
 		match remote_keystore(url) {
 			Ok(k) => keystore_container.set_remote_keystore(k),
-			Err(e) =>
+			Err(e) => {
 				return Err(ServiceError::Other(format!(
 					"Error hooking up remote keystore for {}: {}",
 					url, e
-				))),
+				)))
+			},
 		};
 	}
 	let grandpa_protocol_name = sc_finality_grandpa::protocol_standard_name(
