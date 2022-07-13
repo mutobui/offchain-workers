@@ -14,10 +14,13 @@ mod tests;
 #[cfg(feature = "runtime-benchmarks")]
 mod benchmarking;
 
-use frame_system::offchain::{AppCrypto, CreateSignedTransaction, Signer, SendSignedTransaction};
+use frame_system::offchain::{
+	AppCrypto, CreateSignedTransaction, SendSignedTransaction, Signer, SubmitTransaction,
+};
 use sp_core::crypto::KeyTypeId;
 
 pub const KEY_TYPE: KeyTypeId = KeyTypeId(*b"demo");
+pub const UNSIGNED_TXS_PRIORITY: u64 = 10;
 
 pub mod crypto {
 	use super::KEY_TYPE;
@@ -74,7 +77,7 @@ pub mod pallet {
 	pub enum Event<T: Config> {
 		/// Event documentation should end with an array that provides descriptive names for event
 		/// parameters. [something, who]
-		SomethingStored(u32, T::AccountId),
+		SomethingStored(u32, Option<T::AccountId>),
 	}
 
 	// Errors inform users that something went wrong.
@@ -104,17 +107,16 @@ pub mod pallet {
 
 			let block: u32 = block_number.try_into().ok().unwrap();
 
-			let results = signer
-				.send_signed_transaction(|_account| Call::do_something { something: block });
+			// This is your call to on-chain extrinsic together with any necessary parameters.
+			let call = Call::do_something_unsigned { something: block };
 
-			for (acc, res) in &results {
-				match res {
-					Ok(()) => log::info!("[{:?}]: submit transaction success.", acc.id),
-					Err(e) => {
-						log::error!("[{:?}]: submit transaction failure. Reason: {:?}", acc.id, e)
-					},
-				}
-			}
+			// `submit_unsigned_transaction` returns a type of `Result<(), ()>`
+			//	 ref: https://paritytech.github.io/substrate/latest/frame_system/offchain/struct.SubmitTransaction.html
+			let _ = SubmitTransaction::<T, Call<T>>::submit_unsigned_transaction(call.into()).map_err(
+				|_| {
+					log::error!("Failed in offchain_unsigned_tx");
+				},
+			);
 		}
 	}
 
@@ -136,7 +138,23 @@ pub mod pallet {
 			<Something<T>>::put(something);
 
 			// Emit an event.
-			Self::deposit_event(Event::SomethingStored(something, who));
+			Self::deposit_event(Event::SomethingStored(something, Some(who)));
+			// Return a successful DispatchResultWithPostInfo
+			Ok(())
+		}
+
+		#[pallet::weight(10_000 + T::DbWeight::get().writes(1))]
+		pub fn do_something_unsigned(origin: OriginFor<T>, something: u32) -> DispatchResult {
+			// Check that the extrinsic was signed and get the signer.
+			// This function will return an error if the extrinsic is not signed.
+			// https://docs.substrate.io/v3/runtime/origins
+			let who = ensure_none(origin)?;
+
+			// Update storage.
+			<Something<T>>::put(something);
+
+			// Emit an event.
+			Self::deposit_event(Event::SomethingStored(something, None));
 			// Return a successful DispatchResultWithPostInfo
 			Ok(())
 		}
@@ -161,4 +179,31 @@ pub mod pallet {
 		}
 	}
 
+	#[pallet::validate_unsigned]
+	impl<T: Config> ValidateUnsigned for Pallet<T> {
+		type Call = Call<T>;
+
+		/// Validate unsigned call to this module.
+		///
+		/// By default unsigned transactions are disallowed, but implementing the validator
+		/// here we make sure that some particular calls (the ones produced by offchain worker)
+		/// are being whitelisted and marked as valid.
+		fn validate_unsigned(source: TransactionSource, call: &Self::Call) -> TransactionValidity {
+			let valid_tx = |provide| {
+				ValidTransaction::with_tag_prefix("my-pallet")
+					.priority(UNSIGNED_TXS_PRIORITY) // please define `UNSIGNED_TXS_PRIORITY` before this line
+					.and_provides([&provide])
+					.longevity(3)
+					.propagate(true)
+					.build()
+			};
+
+			match call {
+				Call::do_something_unsigned { something: value } => {
+					valid_tx(b"do_something_unsigned".to_vec())
+				},
+				_ => InvalidTransaction::Call.into(),
+			}
+		}
+	}
 }
